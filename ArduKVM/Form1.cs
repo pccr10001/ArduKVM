@@ -3,6 +3,7 @@ using DDCCI;
 using SharpHook;
 using SharpHook.Native;
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO.Ports;
 using System.Runtime.InteropServices;
 namespace ArduKVM
@@ -20,26 +21,74 @@ namespace ArduKVM
 
         short currentX, currentY = 0;
         bool stop = true;
+        bool toSwitchPC = false;
 
         static DisplayService displayService = new DisplayService();
         private MonitorInfo monitor;
 
         uint currentInput = 0;
-        uint maxInputValue = 0;
 
         byte INPUT_HDMI2 = 0x12;
         byte INPUT_DP = 0x0f;
 
         byte wheel;
 
-        short centerX = (short)(Screen.PrimaryScreen.Bounds.Width / 2);
-        short centerY = (short)(Screen.PrimaryScreen.Bounds.Height / 2);
-
+        IntPtr context;
 
         BlockingCollection<byte[]> queue = new BlockingCollection<byte[]>(100);
 
         [DllImport("user32.dll")]
         public static extern bool SetCursorPos(int X, int Y);
+
+        // Interception API ±`¶q
+        private const int INTERCEPTION_MOUSE = 1;
+        private const int INTERCEPTION_FILTER_MOUSE_ALL = 0xFFFF;
+
+        private const int INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN = 0x001;
+        private const int INTERCEPTION_MOUSE_LEFT_BUTTON_UP = 0x002;
+        private const int INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN = 0x004;
+        private const int INTERCEPTION_MOUSE_RIGHT_BUTTON_UP = 0x008;
+        private const int INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN = 0x010;
+        private const int INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP = 0x020;
+
+        // ¹«????ÌÛ
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MouseStroke
+        {
+            public short state;
+            public short flags;
+            public short rolling;
+            public int x;
+            public int y;
+            public uint information;
+        }
+
+        // ?¤J Interception API
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr interception_create_context();
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void interception_destroy_context(IntPtr context);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int interception_receive(IntPtr context, int device, ref MouseStroke stroke, uint nstroke);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int interception_send(IntPtr context, int device, ref MouseStroke stroke, uint nstroke);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern void interception_set_filter(IntPtr context, Predicate predicate, int filter);
+
+        private delegate int Predicate(int device);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern bool interception_is_mouse(int device);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int interception_wait_with_timeout(IntPtr context, UInt32 milliseconds);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int interception_wait(IntPtr context);
 
         public Form1()
         {
@@ -59,11 +108,6 @@ namespace ArduKVM
 
             globalHook.KeyReleased += OnKeyReleased;
             globalHook.KeyPressed += OnKeyPressed;
-            globalHook.MouseMoved += OnMouseMoved;
-            globalHook.MousePressed += OnMousePressed;
-            globalHook.MouseReleased += OnMouseReleased;
-            globalHook.MouseWheel += OnMouseWheel;
-            globalHook.MouseDragged += OnMouseMoved;
 
             serialPort.ErrorReceived += OnPortDisconnected;
 
@@ -90,7 +134,7 @@ namespace ArduKVM
                 }
             }
             workerSerial.RunWorkerAsync();
-            globalHook.Run();
+            globalHook.RunAsync();
 
         }
 
@@ -140,30 +184,33 @@ namespace ArduKVM
         private void OnKeyReleased(object? sender, KeyboardHookEventArgs e)
         {
 
-            if (e.Data.KeyCode == KeyCode.VcInsert)
+            if (e.Data.KeyCode == KeyCode.VcInsert && keyboardReport[1] == 0x05)
             {
-                if (keyboardReport[1] == 0x05)
-                {
-                    SwitchPCs();
-                    return;
-                }
-            }
-
-            if (!isControllingPCB)
-            {
+                toSwitchPC = true;
                 return;
             }
-
-            e.SuppressEvent = true;
 
             var key = MapKeyCode(e.Data.KeyCode);
             var modifier = MapKeyModifier(e.Data.KeyCode);
-            if (modifier != 0 && ((keyboardReport[1] & modifier) == modifier))
+
+            if (modifier != 0)
             {
-                keyboardReport[1] &= (byte)~modifier;
+                if (((keyboardReport[1] & modifier) == modifier))
+                {
+                    keyboardReport[1] &= (byte)~modifier;
+                }
+
+                if (toSwitchPC && keyboardReport[1] == 0)
+                {
+                    toSwitchPC = false;
+                    SwitchPCs();
+                }
+
                 SendReport(true);
                 return;
             }
+
+            toSwitchPC = false;
 
             for (int i = 3; i < 9; i++)
             {
@@ -302,7 +349,9 @@ namespace ArduKVM
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
+            interception_destroy_context(context);
             globalHook.Dispose();
+
         }
 
         private void timerPps_Tick(object sender, EventArgs e)
@@ -320,34 +369,27 @@ namespace ArduKVM
                     mouseReport[4] = wheel;
                     SendReport(false);
                 }
-
             }
 
-            if (currentX == centerX && currentY == centerY)
+            if (currentX != 0 || currentY != 0)
             {
-                if (!stop)
-                {
-                    mouseReport[2] = 0;
-                    mouseReport[3] = 0;
-                    SendReport(false);
-                }
-                stop = true;
+                stop = false;
+                mouseReport[2] = (byte)currentX;
+                mouseReport[3] = (byte)currentY;
+                SendReport(false);
+
+                currentX = 0;
+                currentY = 0;
                 return;
             }
-            stop = false;
 
-            var deltaX = (3 * (currentX - centerX));
-            var deltaY = (3 * (currentY - centerY));
-
-            mouseReport[2] = deltaX > 127 ? (byte)127 : (deltaX < -127 ? unchecked((byte)-127) : (byte)deltaX);
-            mouseReport[3] = deltaY > 127 ? (byte)127 : (deltaY < -127 ? unchecked((byte)-127) : (byte)deltaY);
-
-            SendReport(false);
-
-            SetCursorPos(Screen.PrimaryScreen.Bounds.Width / 2, Screen.PrimaryScreen.Bounds.Height / 2);
-            currentX = centerX;
-            currentY = centerY;
-
+            if (!stop)
+            {
+                mouseReport[2] = 0;
+                mouseReport[3] = 0;
+                SendReport(false);
+                stop = true;
+            }
         }
 
         private void SendReport(bool keyboard)
@@ -381,15 +423,18 @@ namespace ArduKVM
                 timerPps.Enabled = true;
                 notifyIcon.BalloonTipText = "Controlling PC B";
                 notifyIcon.ShowBalloonTip(1);
+                workerMouse.RunWorkerAsync();
                 displayService.SetVCPCapability(monitor, (char)0x60, INPUT_HDMI2);
             }
             else
             {
+                isControllingPCB = false;
+
                 Array.Clear(keyboardReport, 1, keyboardReport.Length - 1);
                 Array.Clear(mouseReport, 1, mouseReport.Length - 1);
                 SendReport(true);
                 SendReport(false);
-                isControllingPCB = false;
+
                 timerPps.Enabled = false;
                 notifyIcon.BalloonTipText = "Disabled";
                 notifyIcon.ShowBalloonTip(1);
@@ -521,7 +566,7 @@ namespace ArduKVM
                 case KeyCode.VcNumPad9: keycode = 0x61; break;
                 case KeyCode.VcNumPad0: keycode = 0x62; break;
                 case KeyCode.VcNumPadDecimal: keycode = 0x63; break;
-                
+
                 case KeyCode.VcVolumeUp: keycode = 0x80; break;
                 case KeyCode.VcVolumeDown: keycode = 0x81; break;
                 case KeyCode.VcVolumeMute: keycode = 0x7F; break;
@@ -572,7 +617,6 @@ namespace ArduKVM
             {
                 data = queue.Take();
                 serialPort.Write(data, 0, data.Length);
-
             }
         }
 
@@ -587,6 +631,64 @@ namespace ArduKVM
             {
                 SwitchPCs();
             }
+        }
+
+        private void workerMouse_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
+        {
+            context = interception_create_context();
+
+            interception_set_filter(context,
+                device => interception_is_mouse(device) ? 1 : 0,
+                INTERCEPTION_FILTER_MOUSE_ALL);
+
+            int device = 0;
+            int mouse = 0;
+            MouseStroke stroke = new MouseStroke();
+            while (isControllingPCB)
+            {
+                if (mouse == 0)
+                {
+                    device = interception_wait_with_timeout(context, 1000);
+                    if (device == 0)
+                    {
+                        continue;
+                    }
+                    if (interception_is_mouse(device))
+                    {
+                        mouse = device;
+                    }
+                }
+
+
+                if (interception_wait_with_timeout(context, 1000) != mouse)
+                {
+                    continue;
+                }
+                if (interception_receive(context, mouse, ref stroke, 1) > 0)
+                {
+                    switch (stroke.state)
+                    {
+                        case INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN: mouseReport[1] |= 1;SendReport(false); break;
+                        case INTERCEPTION_MOUSE_LEFT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~1); SendReport(false); break;
+                        case INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN: mouseReport[1] |= 2; SendReport(false); break;
+                        case INTERCEPTION_MOUSE_RIGHT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~2); SendReport(false); break;
+                        case INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN: mouseReport[1] |= 4; SendReport(false); break;
+                        case INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP: mouseReport[1] &= unchecked((byte)~4); SendReport(false); break;
+
+                        default:
+                            if (stroke.rolling != 0) { 
+                                wheel = (byte)stroke.rolling;
+                            }
+                            currentX += (short)stroke.x;
+                            currentY += (short)stroke.y;
+                            break;
+                    }
+
+                    //interception_send(context, mouse, ref stroke, 1);
+                }
+            }
+            interception_destroy_context(context);
+            Debug.WriteLine("WorkerMouse done");
         }
     }
 }

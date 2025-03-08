@@ -10,4 +10,6 @@ ArduKVM
 * Find the input code for your display and replace it in code.
 
 ### References
-* https://github.com/Ericvf/DDC-CI/blob/master/DDCCI/DisplayService.cs
+* https://github.com/Ericvf/DDC-CI
+* https://github.com/oblitum/Interception
+

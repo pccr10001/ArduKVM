@@ -37,6 +37,7 @@
             workerSerial = new System.ComponentModel.BackgroundWorker();
             timerPps = new System.Windows.Forms.Timer(components);
             timerInput = new System.Windows.Forms.Timer(components);
+            workerMouse = new System.ComponentModel.BackgroundWorker();
             SuspendLayout();
             // 
             // cbPorts
@@ -80,7 +81,7 @@
             // 
             // timerPps
             // 
-            timerPps.Interval = 2;
+            timerPps.Interval = 4;
             timerPps.Tick += timerPps_Tick;
             // 
             // timerInput
@@ -88,6 +89,10 @@
             timerInput.Enabled = true;
             timerInput.Interval = 1000;
             timerInput.Tick += timerInput_Tick;
+            // 
+            // workerMouse
+            // 
+            workerMouse.DoWork += workerMouse_DoWork;
             // 
             // Form1
             // 
@@ -114,5 +119,6 @@
         private System.ComponentModel.BackgroundWorker workerSerial;
         private System.Windows.Forms.Timer timerPps;
         private System.Windows.Forms.Timer timerInput;
+        private System.ComponentModel.BackgroundWorker workerMouse;
     }
 }
