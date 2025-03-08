@@ -2,10 +2,7 @@
 <SettingsFile xmlns="http://schemas.microsoft.com/VisualStudio/2004/01/settings" CurrentProfile="(Default)" GeneratedClassNamespace="ArduKVM.Properties" GeneratedClassName="Settings">
   <Profiles />
   <Settings>
-    <Setting Name="port" Type="System.String" Scope="User">
-      <Value Profile="(Default)" />
-    </Setting>
-    <Setting Name="mouse" Type="System.String" Scope="User">
+    <Setting Name="mappings" Type="System.String" Scope="User">
       <Value Profile="(Default)" />
     </Setting>
   </Settings>

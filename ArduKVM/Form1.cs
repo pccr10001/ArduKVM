@@ -4,8 +4,12 @@ using SharpHook;
 using SharpHook.Native;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using System.IO.Ports;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 namespace ArduKVM
 {
     public partial class Form1 : Form
@@ -14,7 +18,7 @@ namespace ArduKVM
         private SerialPort serialPort = new SerialPort();
 
         private SimpleGlobalHook globalHook = new();
-        private bool isControllingPCB = false;
+        private bool isControllingExternalPC = false;
 
         byte[] keyboardReport = new byte[9];
         byte[] mouseReport = new byte[5];
@@ -22,14 +26,21 @@ namespace ArduKVM
         short currentX, currentY = 0;
         bool stop = true;
         bool toSwitchPC = false;
+        bool initialized = false;
+
+        int portCount = 0;
+        int selectedInput = 0;
+        string hostInput = "";
 
         static DisplayService displayService = new DisplayService();
+        static INodeFormatter nodeFormatter = new NodeFormatter();
+        static ITokenizer tokenizer = new CapabilitiesTokenizer();
+        static IParser parser = new CapabilitiesParser();
+
         private MonitorInfo monitor;
 
         uint currentInput = 0;
-
-        byte INPUT_HDMI2 = 0x12;
-        byte INPUT_DP = 0x0f;
+        uint maxInputValue = 0;
 
         byte wheel;
 
@@ -37,8 +48,10 @@ namespace ArduKVM
 
         BlockingCollection<byte[]> queue = new BlockingCollection<byte[]>(100);
 
-        [DllImport("user32.dll")]
-        public static extern bool SetCursorPos(int X, int Y);
+        private List<ComboBox> cbInputs = new List<ComboBox>();
+        private List<ComboBox> cbPorts = new List<ComboBox>();
+        private Dictionary<string, string> inputSources = new Dictionary<string, string>();
+        List<PortMapping> mappings = new List<PortMapping>();
 
         // Interception API ±`¶q
         private const int INTERCEPTION_MOUSE = 1;
@@ -51,7 +64,6 @@ namespace ArduKVM
         private const int INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN = 0x010;
         private const int INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP = 0x020;
 
-        // ¹«????ÌÛ
         [StructLayout(LayoutKind.Sequential)]
         public struct MouseStroke
         {
@@ -63,7 +75,12 @@ namespace ArduKVM
             public uint information;
         }
 
-        // ?¤J Interception API
+        class PortMapping
+        {
+            public string Port { get; set; }
+            public string Input { get; set; }
+        }
+
         [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern IntPtr interception_create_context();
 
@@ -95,6 +112,57 @@ namespace ArduKVM
             InitializeComponent();
         }
 
+        private bool InitializeDisplay()
+        {
+            try
+            {
+                var cs = displayService.GetCapabilities(monitor);
+                Console.WriteLine($"CapabilitiesString: {cs}");
+
+                var tokens = tokenizer.GetTokens(cs);
+                var node = parser.Parse(tokens);
+
+                var vcpNode = node.Nodes.RecursiveSelect(n => n.Nodes)
+                    .Single(n => n.Value == "vcp");
+
+                if (vcpNode == null || vcpNode.Nodes.Count() == 0)
+                {
+                    MessageBox.Show($"Failed to get display info, VCP info not found.");
+                    return false;
+                }
+
+                var inputNode = vcpNode.Nodes.Single(n => n.Value == "60");
+                if (inputNode == null || inputNode.Nodes.Count() == 0)
+                {
+                    MessageBox.Show($"Failed to get display info, input info not found.");
+                    return false;
+                }
+
+                foreach (var capabilityNode in inputNode.Nodes.Where(c => c.Nodes == null))
+                {
+                    var inputSource = NodeFormatter.FormatVCPInputSource(capabilityNode.Value.ToLower());
+                    if (inputSource != null)
+                    {
+                        inputSources.Add(inputSource, capabilityNode.Value);
+                    }
+                }
+
+                if (inputSources.Count == 0)
+                {
+                    MessageBox.Show($"Failed to get display info, no input sources detected.");
+                    return false;
+                }
+
+                return true;
+
+            }
+            catch (Exception e)
+            {
+                MessageBox.Show($"Failed to get display info,\n{e.Message}");
+                return false;
+            }
+        }
+
         private void Form1_Load(object sender, EventArgs e)
         {
 
@@ -109,33 +177,87 @@ namespace ArduKVM
             globalHook.KeyReleased += OnKeyReleased;
             globalHook.KeyPressed += OnKeyPressed;
 
-            serialPort.ErrorReceived += OnPortDisconnected;
+            cbPorts.Add(cbPort1);
+            cbPorts.Add(cbPort2);
+            cbPorts.Add(cbPort3);
+            cbPorts.Add(cbPort4);
+
+            cbInputs.Add(cbInput1);
+            cbInputs.Add(cbInput2);
+            cbInputs.Add(cbInput3);
+            cbInputs.Add(cbInput4);
+
+
+            for (int i = 0; i < 4; i++)
+            {
+                cbPorts[i].Items.Add("No used");
+                cbPorts[i].SelectedIndex = 0;
+            }
 
             foreach (var port in SerialPort.GetPortNames())
             {
-                cbPorts.Items.Add(port);
+                for (int i = 0; i < 4; i++)
+                {
+                    cbPorts[i].Items.Add(port);
+                }
+            }
+            for (int i = 0; i < 4; i++)
+            {
+                cbPorts[i].Items.Add("This PC");
             }
 
-            if (cbPorts.Items.Count == 0)
+            if (cbPort1.Items.Count == 2)
             {
                 MessageBox.Show("No serial ports found");
                 Application.Exit();
+                return;
             }
 
-            cbPorts.SelectedIndex = 0;
-
-
-            if (Settings.Default.port != "")
+            if (!InitializeDisplay())
             {
-                if (Connect(Settings.Default.port))
+                Application.Exit();
+                return;
+            }
+
+            for (int i = 0; i < cbInputs.Count; i++)
+            {
+                for (int j = 0; j < inputSources.Keys.Count; j++)
                 {
-                    notifyIcon.Visible = true;
-                    notifyIcon.ShowBalloonTip(1, "ArduKVM", "Connected to " + Settings.Default.port, ToolTipIcon.Info);
+                    cbInputs[i].Items.Add(inputSources.Keys.ElementAt(j));
                 }
             }
+
+            portCount = inputSources.Count < SerialPort.GetPortNames().Length ? inputSources.Count : SerialPort.GetPortNames().Length;
+
+            for (int i = 0; i < portCount; i++)
+            {
+                cbInputs[i].Enabled = true;
+                cbPorts[i].Enabled = true;
+                cbInputs[i].SelectedIndex = i;
+            }
+
+            try
+            {
+                mappings = JsonSerializer.Deserialize<List<PortMapping>>(Settings.Default.mappings);
+                foreach (var mapping in mappings)
+                {
+                    cbPorts[mappings.IndexOf(mapping)].SelectedItem = mapping.Port;
+                    cbInputs[mappings.IndexOf(mapping)].SelectedItem = inputSources.FirstOrDefault(x => x.Value == mapping.Input).Key;
+                }
+                notifyIcon.Visible = true;
+                notifyIcon.BalloonTipText = "ArduKVM initialized.";
+                notifyIcon.BalloonTipIcon = ToolTipIcon.Info;
+                notifyIcon.ShowBalloonTip(1);
+
+            }
+            catch (Exception ex)
+            {
+
+            }
+
+
             workerSerial.RunWorkerAsync();
             globalHook.RunAsync();
-
         }
 
         private void OnKeyPressed(object? sender, KeyboardHookEventArgs e)
@@ -154,7 +276,7 @@ namespace ArduKVM
                 return;
             }
 
-            if (!isControllingPCB)
+            if (!isControllingExternalPC)
             {
                 return;
             }
@@ -223,105 +345,62 @@ namespace ArduKVM
             SendReport(true);
         }
 
-        private void OnMouseMoved(object? sender, MouseHookEventArgs e)
-        {
-            if (!isControllingPCB)
-            {
-                return;
-            }
-
-            e.SuppressEvent = true;
-
-            currentX = e.Data.X;
-            currentY = e.Data.Y;
-        }
-
-        private void OnMousePressed(object? sender, MouseHookEventArgs e)
-        {
-
-            if (!isControllingPCB)
-            {
-                return;
-            }
-            e.SuppressEvent = true;
-
-            switch (e.Data.Button)
-            {
-                case MouseButton.Button1:
-                    mouseReport[1] |= 1;
-                    break;
-                case MouseButton.Button2:
-                    mouseReport[1] |= 2;
-                    break;
-                case MouseButton.Button3:
-                    mouseReport[1] |= 4;
-                    break;
-            }
-            mouseReport[2] = 0;
-            mouseReport[3] = 0;
-            SendReport(false);
-        }
-        private void OnMouseReleased(object? sender, MouseHookEventArgs e)
-        {
-
-            if (!isControllingPCB)
-            {
-                return;
-            }
-            e.SuppressEvent = true;
-
-            switch (e.Data.Button)
-            {
-                case MouseButton.Button1:
-                    mouseReport[1] &= unchecked((byte)~1);
-                    break;
-                case MouseButton.Button2:
-                    mouseReport[1] &= unchecked((byte)~2);
-                    break;
-                case MouseButton.Button3:
-                    mouseReport[1] &= unchecked((byte)~4);
-                    break;
-            }
-            mouseReport[2] = 0;
-            mouseReport[3] = 0;
-            SendReport(false);
-        }
-
-
-        private void OnMouseWheel(object? sender, MouseWheelHookEventArgs e)
-        {
-
-            if (!isControllingPCB)
-            {
-                return;
-            }
-            e.SuppressEvent = true;
-
-            wheel = e.Data.Rotation > 128 ? (byte)1 : unchecked((byte)-1);
-        }
-
-
         private void btnApply_Click(object sender, EventArgs e)
         {
-            if (serialPort.IsOpen)
+
+            string hi = "";
+            var m = new List<PortMapping>();
+            var checkDuplicate = new List<string>();
+            for (int i = 0; i < portCount; i++)
             {
-                serialPort.Close();
+                var pm = new PortMapping()
+                {
+                    Port = cbPorts[i].SelectedItem.ToString(),
+                    Input = inputSources[cbInputs[i].SelectedItem.ToString()]
+                };
+                if (pm.Port == "This PC")
+                {
+                    if (hi != "")
+                    {
+                        MessageBox.Show("Only one port can be set to `This PC`");
+                        return;
+                    }
+                    hi = cbInputs[i].SelectedItem.ToString();
+                }
+                if (pm.Port != "No used")
+                {
+                    if (checkDuplicate.Contains(pm.Port) || checkDuplicate.Contains(pm.Input))
+                    {
+                        MessageBox.Show("Duplicate port or input detected");
+                        return;
+                    }
+                    checkDuplicate.Add(pm.Input);
+                    checkDuplicate.Add(pm.Port);
+                }
+
+                m.Add(pm);
             }
-
-            if (Connect(cbPorts.SelectedItem.ToString()))
+            if (hi == "")
             {
-                notifyIcon.Visible = true;
-                notifyIcon.ShowBalloonTip(1000, "ArduKVM", "Connected to " + cbPorts.SelectedItem.ToString(), ToolTipIcon.Info);
-
-                this.Hide();
-                Settings.Default.port = cbPorts.SelectedItem.ToString();
-                Settings.Default.Save();
+                MessageBox.Show("One port must be set to `This PC`");
                 return;
             }
+
+            mappings.Clear();
+            mappings.AddRange(m);
+
+            hostInput = hi;
+            Settings.Default.mappings = JsonSerializer.Serialize(mappings);
+            Settings.Default.Save();
         }
 
         private bool Connect(string port)
         {
+
+            if (serialPort.IsOpen)
+            {
+                serialPort.Close();
+            }
 
             serialPort.PortName = port;
             serialPort.BaudRate = 1228800;
@@ -337,13 +416,9 @@ namespace ArduKVM
 
             return true;
         }
-        private void OnPortDisconnected(object sender, SerialErrorReceivedEventArgs e)
-        {
-            throw new NotImplementedException();
-        }
-
         private void notifyIcon_DoubleClick(object sender, EventArgs e)
         {
+
             this.Show();
         }
 
@@ -399,7 +474,7 @@ namespace ArduKVM
                 return;
             }
 
-            if (!isControllingPCB)
+            if (!isControllingExternalPC)
             {
                 return;
             }
@@ -417,18 +492,31 @@ namespace ArduKVM
         private void SwitchPCs()
         {
             timerInput.Stop();
-            if (!isControllingPCB)
+
+            while (true)
             {
-                isControllingPCB = true;
-                timerPps.Enabled = true;
-                notifyIcon.BalloonTipText = "Controlling PC B";
-                notifyIcon.ShowBalloonTip(1);
-                workerMouse.RunWorkerAsync();
-                displayService.SetVCPCapability(monitor, (char)0x60, INPUT_HDMI2);
+                selectedInput++;
+                if (selectedInput >= portCount)
+                {
+                    selectedInput = 0;
+                }
+                if (mappings[selectedInput].Port == "No used")
+                {
+                    continue;
+                }
+                break;
             }
-            else
+            var pm = mappings[selectedInput];
+            uint inputId = Convert.ToUInt32(pm.Input,16);
+
+            if (currentInput == inputId) {
+                timerInput.Start();
+                return;
+            }
+
+            if (pm.Port == "This PC")
             {
-                isControllingPCB = false;
+                isControllingExternalPC = false;
 
                 Array.Clear(keyboardReport, 1, keyboardReport.Length - 1);
                 Array.Clear(mouseReport, 1, mouseReport.Length - 1);
@@ -438,8 +526,19 @@ namespace ArduKVM
                 timerPps.Enabled = false;
                 notifyIcon.BalloonTipText = "Disabled";
                 notifyIcon.ShowBalloonTip(1);
-                displayService.SetVCPCapability(monitor, (char)0x60, INPUT_DP);
+                serialPort.Close();
+                
             }
+            else {
+                Connect(pm.Port);
+                isControllingExternalPC = true;
+                timerPps.Enabled = true;
+                notifyIcon.BalloonTipText = "Controlling PC B";
+                notifyIcon.ShowBalloonTip(1);
+                workerMouse.RunWorkerAsync();
+            }
+            displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
+
             timerInput.Start();
         }
         public static class HIDModifiers
@@ -623,13 +722,13 @@ namespace ArduKVM
         private void timerInput_Tick(object sender, EventArgs e)
         {
             dxva2.GetVCPFeatureAndVCPFeatureReply(monitor.Handle, (char)0x60, IntPtr.Zero, out currentInput, out maxInputValue);
-            if (currentInput == INPUT_HDMI2 && !isControllingPCB)
+            for (int i = 0; i < mappings.Count; i++)
             {
-                SwitchPCs();
-            }
-            else if (currentInput == INPUT_DP && isControllingPCB)
-            {
-                SwitchPCs();
+                if (currentInput == Convert.ToInt32(mappings[i].Input, 16))
+                {
+                    selectedInput = i;
+                    break;
+                }
             }
         }
 
@@ -644,7 +743,7 @@ namespace ArduKVM
             int device = 0;
             int mouse = 0;
             MouseStroke stroke = new MouseStroke();
-            while (isControllingPCB)
+            while (isControllingExternalPC)
             {
                 if (mouse == 0)
                 {
@@ -664,11 +763,12 @@ namespace ArduKVM
                 {
                     continue;
                 }
+
                 if (interception_receive(context, mouse, ref stroke, 1) > 0)
                 {
                     switch (stroke.state)
                     {
-                        case INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN: mouseReport[1] |= 1;SendReport(false); break;
+                        case INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN: mouseReport[1] |= 1; SendReport(false); break;
                         case INTERCEPTION_MOUSE_LEFT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~1); SendReport(false); break;
                         case INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN: mouseReport[1] |= 2; SendReport(false); break;
                         case INTERCEPTION_MOUSE_RIGHT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~2); SendReport(false); break;
@@ -676,7 +776,8 @@ namespace ArduKVM
                         case INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP: mouseReport[1] &= unchecked((byte)~4); SendReport(false); break;
 
                         default:
-                            if (stroke.rolling != 0) { 
+                            if (stroke.rolling != 0)
+                            {
                                 wheel = (byte)stroke.rolling;
                             }
                             currentX += (short)stroke.x;
@@ -689,6 +790,15 @@ namespace ArduKVM
             }
             interception_destroy_context(context);
             Debug.WriteLine("WorkerMouse done");
+        }
+
+        private void Form1_Shown(object sender, EventArgs e)
+        {
+            if (!initialized && mappings.Count > 0)
+            {
+                this.Hide();
+                initialized = true;
+            }
         }
     }
 }

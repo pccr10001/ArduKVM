@@ -129,7 +129,7 @@ namespace DDCCI
             }
         }
 
-        static string FormatVCPInputSource(string vcpControlName)
+        public static string FormatVCPInputSource(string vcpControlName)
         {
             switch (vcpControlName)
             {
