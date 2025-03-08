@@ -489,6 +489,9 @@ namespace ArduKVM
                 case KeyCode.VcCapsLock: keycode = 0x39; break;
 
                 // Navigation
+                case KeyCode.VcPrintScreen: keycode = 0x46; break;
+                case KeyCode.VcScrollLock: keycode = 0x47; break;
+                case KeyCode.VcPause: keycode = 0x48; break;
                 case KeyCode.VcInsert: keycode = 0x49; break;
                 case KeyCode.VcHome: keycode = 0x4A; break;
                 case KeyCode.VcPageUp: keycode = 0x4B; break;
@@ -499,6 +502,29 @@ namespace ArduKVM
                 case KeyCode.VcLeft: keycode = 0x50; break;
                 case KeyCode.VcDown: keycode = 0x51; break;
                 case KeyCode.VcUp: keycode = 0x52; break;
+
+                //NumPad
+                case KeyCode.VcNumLock: keycode = 0x53; break;
+                case KeyCode.VcNumPadDivide: keycode = 0x54; break;
+                case KeyCode.VcNumPadMultiply: keycode = 0x55; break;
+                case KeyCode.VcNumPadSubtract: keycode = 0x56; break;
+                case KeyCode.VcNumPadAdd: keycode = 0x57; break;
+                case KeyCode.VcNumPadEnter: keycode = 0x58; break;
+                case KeyCode.VcNumPad1: keycode = 0x59; break;
+                case KeyCode.VcNumPad2: keycode = 0x5A; break;
+                case KeyCode.VcNumPad3: keycode = 0x5B; break;
+                case KeyCode.VcNumPad4: keycode = 0x5C; break;
+                case KeyCode.VcNumPad5: keycode = 0x5D; break;
+                case KeyCode.VcNumPad6: keycode = 0x5E; break;
+                case KeyCode.VcNumPad7: keycode = 0x5F; break;
+                case KeyCode.VcNumPad8: keycode = 0x60; break;
+                case KeyCode.VcNumPad9: keycode = 0x61; break;
+                case KeyCode.VcNumPad0: keycode = 0x62; break;
+                case KeyCode.VcNumPadDecimal: keycode = 0x63; break;
+                
+                case KeyCode.VcVolumeUp: keycode = 0x80; break;
+                case KeyCode.VcVolumeDown: keycode = 0x81; break;
+                case KeyCode.VcVolumeMute: keycode = 0x7F; break;
             }
 
             return keycode;
