@@ -17,7 +17,7 @@ ArduKVM
  
 ### ToDo
 * DFU firmware upgrade
-* Running as system service to prevent control to external computers
+* Running as system service to prevent losing control to external computers
 * Migrate keyboard capturer to Interception
 
 ### References
