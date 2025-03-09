@@ -763,6 +763,7 @@ namespace ArduKVM
             interception_set_filter(context,
                 device => interception_is_mouse(device) ? 1 : 0,
                 INTERCEPTION_FILTER_MOUSE_ALL);
+                            INTERCEPTION_FILTER_MOUSE_ALL);
 
             int device = 0;
             int mouse = 0;
