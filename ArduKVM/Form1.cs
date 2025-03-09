@@ -29,7 +29,8 @@ namespace ArduKVM
         bool initialized = false;
 
         int portCount = 0;
-        int selectedInput = 0;
+        int selectedInput = -1;
+        int currentInput = 0;
         string hostInput = "";
 
         static DisplayService displayService = new DisplayService();
@@ -39,7 +40,6 @@ namespace ArduKVM
 
         private MonitorInfo monitor;
 
-        uint currentInput = 0;
         uint maxInputValue = 0;
 
         byte wheel;
@@ -169,7 +169,6 @@ namespace ArduKVM
             var monitors = displayService.GetMonitors();
             monitor = monitors.First();
             displayService.GetCapabilities(monitor);
-            dxva2.GetVCPFeatureAndVCPFeatureReply(monitor.Handle, (char)0x60, IntPtr.Zero, out currentInput, out maxInputValue);
 
             keyboardReport[0] = 0x73;
             mouseReport[0] = 0x74;
@@ -256,6 +255,7 @@ namespace ArduKVM
             }
 
             UpdateCurrentInput();
+            SwitchPCs();
 
             workerSerial.RunWorkerAsync();
             globalHook.RunAsync();
@@ -326,7 +326,7 @@ namespace ArduKVM
                 if (toSwitchPC && keyboardReport[1] == 0)
                 {
                     toSwitchPC = false;
-                    SwitchPCs(false);
+                    SwitchPCs();
                 }
 
                 SendReport(true);
@@ -441,17 +441,17 @@ namespace ArduKVM
         {
             if (wheel != 0)
             {
-                if (mouseReport[4] != 0)
-                {
-                    mouseReport[4] = 0;
-                    SendReport(false);
-                    wheel = 0;
-                }
-                else
-                {
-                    mouseReport[4] = wheel;
-                    SendReport(false);
-                }
+                mouseReport[4] = wheel;
+                SendReport(false);
+                wheel = 0;
+                return;
+            }
+
+            if (mouseReport[4] != 0)
+            {
+                mouseReport[4] = 0;
+                SendReport(false);
+                return;
             }
 
             if (currentX != 0 || currentY != 0)
@@ -497,7 +497,7 @@ namespace ArduKVM
             }
         }
 
-        private void SwitchPCs(bool inputChanged)
+        private void SwitchPCs()
         {
 
             UpdateCurrentInput();
@@ -507,30 +507,33 @@ namespace ArduKVM
             SendReport(true);
             SendReport(false);
 
-            while (true)
+            bool switchControlOnly = false;
+
+            if (selectedInput != currentInput)
             {
-                selectedInput++;
-                if (selectedInput >= portCount)
+                selectedInput = currentInput;
+                switchControlOnly = true;
+            }
+            else
+            {
+                while (true)
                 {
-                    selectedInput = 0;
+                    selectedInput++;
+                    if (selectedInput >= portCount)
+                    {
+                        selectedInput = 0;
+                    }
+                    if (mappings[selectedInput].Port == "No used")
+                    {
+                        continue;
+                    }
+                    break;
                 }
-                if (mappings[selectedInput].Port == "No used")
-                {
-                    continue;
-                }
-                break;
             }
 
 
             var pm = mappings[selectedInput];
             uint inputId = Convert.ToUInt32(pm.Input, 16);
-
-            Debug.WriteLine($"Switching to {pm.Port} {pm.Input}");
-
-            if (currentInput == inputId)
-            {
-                return;
-            }
 
             Debug.WriteLine($"Start switching");
 
@@ -554,7 +557,10 @@ namespace ArduKVM
                 workerMouse.RunWorkerAsync();
             }
 
-            displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
+            if (!switchControlOnly)
+            {
+                displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
+            }
             UpdateCurrentInput();
 
         }
@@ -734,18 +740,20 @@ namespace ArduKVM
             {
                 data = queue.Take();
                 serialPort.Write(data, 0, data.Length);
+                Debug.WriteLine($"Sent: {BitConverter.ToString(data)}");
             }
         }
 
 
         private void UpdateCurrentInput()
         {
-            dxva2.GetVCPFeatureAndVCPFeatureReply(monitor.Handle, (char)0x60, IntPtr.Zero, out currentInput, out maxInputValue);
+            uint current;
+            dxva2.GetVCPFeatureAndVCPFeatureReply(monitor.Handle, (char)0x60, IntPtr.Zero, out current, out maxInputValue);
             for (int i = 0; i < mappings.Count; i++)
             {
-                if (currentInput == Convert.ToInt32(mappings[i].Input, 16))
+                if (current == Convert.ToInt32(mappings[i].Input, 16))
                 {
-                    selectedInput = i;
+                    currentInput = i;
                     break;
                 }
             }
@@ -763,7 +771,6 @@ namespace ArduKVM
             interception_set_filter(context,
                 device => interception_is_mouse(device) ? 1 : 0,
                 INTERCEPTION_FILTER_MOUSE_ALL);
-                            INTERCEPTION_FILTER_MOUSE_ALL);
 
             int device = 0;
             int mouse = 0;
