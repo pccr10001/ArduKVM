@@ -325,7 +325,7 @@ namespace ArduKVM
                 if (toSwitchPC && keyboardReport[1] == 0)
                 {
                     toSwitchPC = false;
-                    SwitchPCs();
+                    SwitchPCs(false);
                 }
 
                 SendReport(true);
@@ -489,55 +489,77 @@ namespace ArduKVM
             }
         }
 
-        private void SwitchPCs()
+        private void SwitchPCs(bool inputChanged)
         {
             timerInput.Stop();
 
-            while (true)
-            {
-                selectedInput++;
-                if (selectedInput >= portCount)
-                {
-                    selectedInput = 0;
-                }
-                if (mappings[selectedInput].Port == "No used")
-                {
-                    continue;
-                }
-                break;
-            }
-            var pm = mappings[selectedInput];
-            uint inputId = Convert.ToUInt32(pm.Input,16);
+            Array.Clear(keyboardReport, 1, keyboardReport.Length - 1);
+            Array.Clear(mouseReport, 1, mouseReport.Length - 1);
+            SendReport(true);
+            SendReport(false);
 
-            if (currentInput == inputId) {
-                timerInput.Start();
-                return;
+            if (!inputChanged)
+            {
+                while (true)
+                {
+                    selectedInput++;
+                    if (selectedInput >= portCount)
+                    {
+                        selectedInput = 0;
+                    }
+                    if (mappings[selectedInput].Port == "No used")
+                    {
+                        continue;
+                    }
+                    break;
+                }
             }
+
+            var pm = mappings[selectedInput];
+            uint inputId = Convert.ToUInt32(pm.Input, 16);
+
+            Debug.WriteLine($"Switching to {pm.Port} {pm.Input}");
+
+            // if input changed from display, skip checking
+            if (!inputChanged)
+            {
+                if (currentInput == inputId)
+                {
+                    timerInput.Start();
+                    return;
+                }
+            }
+
+
+            Debug.WriteLine($"Start switching");
 
             if (pm.Port == "This PC")
             {
                 isControllingExternalPC = false;
 
-                Array.Clear(keyboardReport, 1, keyboardReport.Length - 1);
-                Array.Clear(mouseReport, 1, mouseReport.Length - 1);
-                SendReport(true);
-                SendReport(false);
-
                 timerPps.Enabled = false;
                 notifyIcon.BalloonTipText = "Disabled";
                 notifyIcon.ShowBalloonTip(1);
                 serialPort.Close();
-                
+
             }
-            else {
+            else
+            {
+
                 Connect(pm.Port);
+
                 isControllingExternalPC = true;
                 timerPps.Enabled = true;
                 notifyIcon.BalloonTipText = "Controlling PC B";
                 notifyIcon.ShowBalloonTip(1);
                 workerMouse.RunWorkerAsync();
             }
-            displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
+
+            if (!inputChanged)
+            {
+                displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
+            }
+
 
             timerInput.Start();
         }
@@ -726,7 +748,12 @@ namespace ArduKVM
             {
                 if (currentInput == Convert.ToInt32(mappings[i].Input, 16))
                 {
-                    selectedInput = i;
+                    if (selectedInput != i)
+                    {
+                        Debug.WriteLine("Input changed");
+                        selectedInput = i;
+                        SwitchPCs(true);
+                    }
                     break;
                 }
             }
