@@ -171,8 +171,8 @@ namespace ArduKVM
             displayService.GetCapabilities(monitor);
             dxva2.GetVCPFeatureAndVCPFeatureReply(monitor.Handle, (char)0x60, IntPtr.Zero, out currentInput, out maxInputValue);
 
-            keyboardReport[0] = 0xb3;
-            mouseReport[0] = 0xb4;
+            keyboardReport[0] = 0x73;
+            mouseReport[0] = 0x74;
 
             globalHook.KeyReleased += OnKeyReleased;
             globalHook.KeyPressed += OnKeyPressed;
@@ -255,6 +255,7 @@ namespace ArduKVM
 
             }
 
+            UpdateCurrentInput();
 
             workerSerial.RunWorkerAsync();
             globalHook.RunAsync();
@@ -392,6 +393,7 @@ namespace ArduKVM
             hostInput = hi;
             Settings.Default.mappings = JsonSerializer.Serialize(mappings);
             Settings.Default.Save();
+
         }
 
         private bool Connect(string port)
@@ -424,9 +426,15 @@ namespace ArduKVM
 
         private void Form1_FormClosing(object sender, FormClosingEventArgs e)
         {
-            interception_destroy_context(context);
-            globalHook.Dispose();
+            try
+            {
+                interception_destroy_context(context);
+            }
+            catch (Exception ex)
+            {
+            }
 
+            globalHook.Dispose();
         }
 
         private void timerPps_Tick(object sender, EventArgs e)
@@ -491,45 +499,38 @@ namespace ArduKVM
 
         private void SwitchPCs(bool inputChanged)
         {
-            timerInput.Stop();
+
+            UpdateCurrentInput();
 
             Array.Clear(keyboardReport, 1, keyboardReport.Length - 1);
             Array.Clear(mouseReport, 1, mouseReport.Length - 1);
             SendReport(true);
             SendReport(false);
 
-            if (!inputChanged)
+            while (true)
             {
-                while (true)
+                selectedInput++;
+                if (selectedInput >= portCount)
                 {
-                    selectedInput++;
-                    if (selectedInput >= portCount)
-                    {
-                        selectedInput = 0;
-                    }
-                    if (mappings[selectedInput].Port == "No used")
-                    {
-                        continue;
-                    }
-                    break;
+                    selectedInput = 0;
                 }
+                if (mappings[selectedInput].Port == "No used")
+                {
+                    continue;
+                }
+                break;
             }
+
 
             var pm = mappings[selectedInput];
             uint inputId = Convert.ToUInt32(pm.Input, 16);
 
             Debug.WriteLine($"Switching to {pm.Port} {pm.Input}");
 
-            // if input changed from display, skip checking
-            if (!inputChanged)
+            if (currentInput == inputId)
             {
-                if (currentInput == inputId)
-                {
-                    timerInput.Start();
-                    return;
-                }
+                return;
             }
-
 
             Debug.WriteLine($"Start switching");
 
@@ -545,23 +546,17 @@ namespace ArduKVM
             }
             else
             {
-
                 Connect(pm.Port);
-
                 isControllingExternalPC = true;
                 timerPps.Enabled = true;
-                notifyIcon.BalloonTipText = "Controlling PC B";
+                notifyIcon.BalloonTipText = "Controlling PC";
                 notifyIcon.ShowBalloonTip(1);
                 workerMouse.RunWorkerAsync();
             }
 
-            if (!inputChanged)
-            {
-                displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
-            }
+            displayService.SetVCPCapability(monitor, (char)0x60, (int)inputId);
+            UpdateCurrentInput();
 
-
-            timerInput.Start();
         }
         public static class HIDModifiers
         {
@@ -621,20 +616,6 @@ namespace ArduKVM
                 case KeyCode.Vc9: keycode = 0x26; break;
                 case KeyCode.Vc0: keycode = 0x27; break;
 
-                // Function keys
-                case KeyCode.VcF1: keycode = 0x3A; break;
-                case KeyCode.VcF2: keycode = 0x3B; break;
-                case KeyCode.VcF3: keycode = 0x3C; break;
-                case KeyCode.VcF4: keycode = 0x3D; break;
-                case KeyCode.VcF5: keycode = 0x3E; break;
-                case KeyCode.VcF6: keycode = 0x3F; break;
-                case KeyCode.VcF7: keycode = 0x40; break;
-                case KeyCode.VcF8: keycode = 0x41; break;
-                case KeyCode.VcF9: keycode = 0x42; break;
-                case KeyCode.VcF10: keycode = 0x43; break;
-                case KeyCode.VcF11: keycode = 0x44; break;
-                case KeyCode.VcF12: keycode = 0x45; break;
-
                 // Special keys
                 case KeyCode.VcEnter: keycode = 0x28; break;
                 case KeyCode.VcEscape: keycode = 0x29; break;
@@ -653,6 +634,20 @@ namespace ArduKVM
                 case KeyCode.VcPeriod: keycode = 0x37; break;
                 case KeyCode.VcSlash: keycode = 0x38; break;
                 case KeyCode.VcCapsLock: keycode = 0x39; break;
+
+                // Function keys
+                case KeyCode.VcF1: keycode = 0x3A; break;
+                case KeyCode.VcF2: keycode = 0x3B; break;
+                case KeyCode.VcF3: keycode = 0x3C; break;
+                case KeyCode.VcF4: keycode = 0x3D; break;
+                case KeyCode.VcF5: keycode = 0x3E; break;
+                case KeyCode.VcF6: keycode = 0x3F; break;
+                case KeyCode.VcF7: keycode = 0x40; break;
+                case KeyCode.VcF8: keycode = 0x41; break;
+                case KeyCode.VcF9: keycode = 0x42; break;
+                case KeyCode.VcF10: keycode = 0x43; break;
+                case KeyCode.VcF11: keycode = 0x44; break;
+                case KeyCode.VcF12: keycode = 0x45; break;
 
                 // Navigation
                 case KeyCode.VcPrintScreen: keycode = 0x46; break;
@@ -688,9 +683,10 @@ namespace ArduKVM
                 case KeyCode.VcNumPad0: keycode = 0x62; break;
                 case KeyCode.VcNumPadDecimal: keycode = 0x63; break;
 
+                case KeyCode.VcVolumeMute: keycode = 0x7F; break;
                 case KeyCode.VcVolumeUp: keycode = 0x80; break;
                 case KeyCode.VcVolumeDown: keycode = 0x81; break;
-                case KeyCode.VcVolumeMute: keycode = 0x7F; break;
+
             }
 
             return keycode;
@@ -741,22 +737,23 @@ namespace ArduKVM
             }
         }
 
-        private void timerInput_Tick(object sender, EventArgs e)
+
+        private void UpdateCurrentInput()
         {
             dxva2.GetVCPFeatureAndVCPFeatureReply(monitor.Handle, (char)0x60, IntPtr.Zero, out currentInput, out maxInputValue);
             for (int i = 0; i < mappings.Count; i++)
             {
                 if (currentInput == Convert.ToInt32(mappings[i].Input, 16))
                 {
-                    if (selectedInput != i)
-                    {
-                        Debug.WriteLine("Input changed");
-                        selectedInput = i;
-                        SwitchPCs(true);
-                    }
+                    selectedInput = i;
                     break;
                 }
             }
+        }
+
+        private void timerInput_Tick(object sender, EventArgs e)
+        {
+
         }
 
         private void workerMouse_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
@@ -806,6 +803,7 @@ namespace ArduKVM
                             if (stroke.rolling != 0)
                             {
                                 wheel = (byte)stroke.rolling;
+                                break;
                             }
                             currentX += (short)stroke.x;
                             currentY += (short)stroke.y;
@@ -827,5 +825,7 @@ namespace ArduKVM
                 initialized = true;
             }
         }
+
+
     }
 }

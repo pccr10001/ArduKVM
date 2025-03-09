@@ -48,6 +48,7 @@
             label4 = new Label();
             cbInput4 = new ComboBox();
             cbPort4 = new ComboBox();
+            cbCheckInputChanged = new CheckBox();
             SuspendLayout();
             // 
             // cbPort1
@@ -62,7 +63,7 @@
             // 
             // btnApply
             // 
-            btnApply.Location = new Point(22, 153);
+            btnApply.Location = new Point(22, 181);
             btnApply.Name = "btnApply";
             btnApply.Size = new Size(340, 38);
             btnApply.TabIndex = 2;
@@ -202,11 +203,22 @@
             cbPort4.Size = new Size(151, 27);
             cbPort4.TabIndex = 11;
             // 
+            // cbCheckInputChanged
+            // 
+            cbCheckInputChanged.AutoSize = true;
+            cbCheckInputChanged.Location = new Point(22, 152);
+            cbCheckInputChanged.Name = "cbCheckInputChanged";
+            cbCheckInputChanged.Size = new Size(217, 23);
+            cbCheckInputChanged.TabIndex = 14;
+            cbCheckInputChanged.Text = "Check input change events";
+            cbCheckInputChanged.UseVisualStyleBackColor = true;
+            // 
             // Form1
             // 
             AutoScaleDimensions = new SizeF(9F, 19F);
             AutoScaleMode = AutoScaleMode.Font;
-            ClientSize = new Size(382, 203);
+            ClientSize = new Size(382, 231);
+            Controls.Add(cbCheckInputChanged);
             Controls.Add(label4);
             Controls.Add(cbInput4);
             Controls.Add(cbPort4);
@@ -249,5 +261,6 @@
         private Label label4;
         private ComboBox cbInput4;
         private ComboBox cbPort4;
+        private CheckBox cbCheckInputChanged;
     }
 }
