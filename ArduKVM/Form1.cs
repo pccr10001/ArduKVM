@@ -1,15 +1,10 @@
 using ArduKVM.Properties;
 using DDCCI;
-using SharpHook;
-using SharpHook.Native;
 using System.Collections.Concurrent;
 using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using System.IO.Ports;
-using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 namespace ArduKVM
 {
     public partial class Form1 : Form
@@ -17,7 +12,6 @@ namespace ArduKVM
 
         private SerialPort serialPort = new SerialPort();
 
-        private SimpleGlobalHook globalHook = new();
         private bool isControllingExternalPC = false;
 
         byte[] keyboardReport = new byte[9];
@@ -44,7 +38,12 @@ namespace ArduKVM
 
         byte wheel;
 
-        IntPtr context;
+        IntPtr mouseContext;
+        IntPtr keyboardContext;
+
+        byte mouseButtonState = 0;
+
+        bool pausePressed = false;
 
         BlockingCollection<byte[]> queue = new BlockingCollection<byte[]>(100);
 
@@ -53,9 +52,15 @@ namespace ArduKVM
         private Dictionary<string, string> inputSources = new Dictionary<string, string>();
         List<PortMapping> mappings = new List<PortMapping>();
 
-        // Interception API ±`¶q
-        private const int INTERCEPTION_MOUSE = 1;
+
         private const int INTERCEPTION_FILTER_MOUSE_ALL = 0xFFFF;
+        private const int INTERCEPTION_FILTER_KEY_ALL = 0xFFFF;
+
+        private const int INTERCEPTION_KEY_DOWN = 0x00;
+        private const int INTERCEPTION_KEY_UP = 0x01;
+        private const int INTERCEPTION_KEY_E0 = 0x02;
+        private const int INTERCEPTION_KEY_E1 = 0x04;
+
 
         private const int INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN = 0x001;
         private const int INTERCEPTION_MOUSE_LEFT_BUTTON_UP = 0x002;
@@ -75,6 +80,25 @@ namespace ArduKVM
             public uint information;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct KeyStroke
+        {
+            public short code;
+            public short state;
+            public uint information;
+        }
+
+        [StructLayout(LayoutKind.Explicit)]
+        public struct InterceptionStroke
+        {
+            [FieldOffset(0)]
+            public MouseStroke Mouse;
+
+            [FieldOffset(0)]
+            public KeyStroke Keyboard;
+        }
+
+
         class PortMapping
         {
             public string Port { get; set; }
@@ -88,10 +112,10 @@ namespace ArduKVM
         private static extern void interception_destroy_context(IntPtr context);
 
         [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int interception_receive(IntPtr context, int device, ref MouseStroke stroke, uint nstroke);
+        private static extern int interception_receive(IntPtr context, int device, ref InterceptionStroke stroke, uint nstroke);
 
         [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
-        private static extern int interception_send(IntPtr context, int device, ref MouseStroke stroke, uint nstroke);
+        private static extern int interception_send(IntPtr context, int device, ref InterceptionStroke stroke, uint nstroke);
 
         [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern void interception_set_filter(IntPtr context, Predicate predicate, int filter);
@@ -100,6 +124,9 @@ namespace ArduKVM
 
         [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern bool interception_is_mouse(int device);
+
+        [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern bool interception_is_keyboard(int device);
 
         [DllImport("interception.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int interception_wait_with_timeout(IntPtr context, UInt32 milliseconds);
@@ -172,9 +199,6 @@ namespace ArduKVM
 
             keyboardReport[0] = 0x73;
             mouseReport[0] = 0x74;
-
-            globalHook.KeyReleased += OnKeyReleased;
-            globalHook.KeyPressed += OnKeyPressed;
 
             cbPorts.Add(cbPort1);
             cbPorts.Add(cbPort2);
@@ -258,14 +282,14 @@ namespace ArduKVM
             SwitchPCs();
 
             workerSerial.RunWorkerAsync();
-            globalHook.RunAsync();
+            workerKeyboard.RunWorkerAsync();
         }
 
-        private void OnKeyPressed(object? sender, KeyboardHookEventArgs e)
+        private bool OnKeyPressed(short scanCode, short state)
         {
 
-            var key = MapKeyCode(e.Data.KeyCode);
-            var modifier = MapKeyModifier(e.Data.KeyCode);
+            var key = MapKeyCode(scanCode, state);
+            var modifier = MapKeyModifier(scanCode, state);
 
             if (modifier != 0)
             {
@@ -274,14 +298,33 @@ namespace ArduKVM
                     keyboardReport[1] |= modifier;
                     SendReport(true);
                 }
-                return;
+                if (isControllingExternalPC)
+                {
+                    return false;
+                }
+                return true;
             }
 
             if (!isControllingExternalPC)
             {
-                return;
+                return true;
             }
-            e.SuppressEvent = true;
+
+            if (key == 0x48 && keyboardReport[1] == 0)
+            {
+                pausePressed = true;
+            }
+
+            if (key == 0x53 && keyboardReport[1] == 0 && pausePressed)
+            {
+                if (isControllingExternalPC)
+                {
+                    return false;
+                }
+                return true;
+                
+            }
+
 
             int zeroIdx = 0;
 
@@ -289,7 +332,7 @@ namespace ArduKVM
             {
                 if (keyboardReport[i] == key)
                 {
-                    return;
+                    return false;
                 }
                 if (zeroIdx == 0 && keyboardReport[i] == 0)
                 {
@@ -298,23 +341,37 @@ namespace ArduKVM
             }
             if (zeroIdx == 0)
             {
-                return;
+                return false;
             }
             keyboardReport[zeroIdx] = key;
             SendReport(true);
+            return false;
         }
 
-        private void OnKeyReleased(object? sender, KeyboardHookEventArgs e)
+        private bool OnKeyReleased(short scanCode, short state)
         {
 
-            if (e.Data.KeyCode == KeyCode.VcInsert && keyboardReport[1] == 0x05)
+            var key = MapKeyCode(scanCode, state);
+            var modifier = MapKeyModifier(scanCode, state);
+
+            if (key == 0 && modifier == 0)
             {
-                toSwitchPC = true;
-                return;
+                return true;
             }
 
-            var key = MapKeyCode(e.Data.KeyCode);
-            var modifier = MapKeyModifier(e.Data.KeyCode);
+            if (scanCode == 0x52 && keyboardReport[1] == 0x05)
+            {
+                toSwitchPC = true;
+                if (isControllingExternalPC)
+                {
+                    return false;
+                }
+                else
+                {
+                    return true;
+                }
+
+            }
 
             if (modifier != 0)
             {
@@ -326,14 +383,34 @@ namespace ArduKVM
                 if (toSwitchPC && keyboardReport[1] == 0)
                 {
                     toSwitchPC = false;
-                    SwitchPCs();
+                    Invoke((MethodInvoker)delegate { workerSwitchPC.RunWorkerAsync(); });
                 }
 
                 SendReport(true);
-                return;
+                return true;
             }
 
             toSwitchPC = false;
+
+            if (!isControllingExternalPC)
+            {
+                return true;
+            }
+
+            if (key == 0x48 && keyboardReport[1] == 0)
+            {
+                pausePressed = true;
+            }
+
+            if (key == 0x53 && keyboardReport[1] == 0 && pausePressed)
+            {
+                pausePressed = false;
+                if (isControllingExternalPC)
+                {
+                    return false;
+                }
+                return true;
+            }
 
             for (int i = 3; i < 9; i++)
             {
@@ -344,6 +421,14 @@ namespace ArduKVM
             }
 
             SendReport(true);
+            if (isControllingExternalPC)
+            {
+                return false;
+            }
+            else
+            {
+                return true;
+            }
         }
 
         private void btnApply_Click(object sender, EventArgs e)
@@ -428,17 +513,24 @@ namespace ArduKVM
         {
             try
             {
-                interception_destroy_context(context);
+                interception_destroy_context(mouseContext);
+                interception_destroy_context(keyboardContext);
             }
             catch (Exception ex)
             {
             }
 
-            globalHook.Dispose();
         }
 
         private void timerPps_Tick(object sender, EventArgs e)
         {
+            if (mouseButtonState != mouseReport[1])
+            {
+                mouseButtonState = mouseReport[1];
+                SendReport(false);
+                return;
+            }
+
             if (wheel != 0)
             {
                 mouseReport[4] = wheel;
@@ -473,6 +565,7 @@ namespace ArduKVM
                 SendReport(false);
                 stop = true;
             }
+
         }
 
         private void SendReport(bool keyboard)
@@ -541,7 +634,7 @@ namespace ArduKVM
             {
                 isControllingExternalPC = false;
 
-                timerPps.Enabled = false;
+                timerPps.Stop();
                 notifyIcon.BalloonTipText = "Disabled";
                 notifyIcon.ShowBalloonTip(1);
                 serialPort.Close();
@@ -551,7 +644,7 @@ namespace ArduKVM
             {
                 Connect(pm.Port);
                 isControllingExternalPC = true;
-                timerPps.Enabled = true;
+                timerPps.Start();
                 notifyIcon.BalloonTipText = "Controlling PC";
                 notifyIcon.ShowBalloonTip(1);
                 workerMouse.RunWorkerAsync();
@@ -576,161 +669,167 @@ namespace ArduKVM
             public const byte RIGHTGUI = 0x80;
         }
 
-        public static byte MapKeyCode(KeyCode keyCode)
+        private byte MapKeyCode(short scanCode, short state)
         {
-            byte keycode = 0;
+            bool isE0 = (state & INTERCEPTION_KEY_E0) != 0;
+            bool isE1 = (state & INTERCEPTION_KEY_E1) != 0;
 
-            switch (keyCode)
+            int hidCode = 0;
+
+            if (isE0)
             {
-                // Letters
-                case KeyCode.VcA: keycode = 0x04; break;
-                case KeyCode.VcB: keycode = 0x05; break;
-                case KeyCode.VcC: keycode = 0x06; break;
-                case KeyCode.VcD: keycode = 0x07; break;
-                case KeyCode.VcE: keycode = 0x08; break;
-                case KeyCode.VcF: keycode = 0x09; break;
-                case KeyCode.VcG: keycode = 0x0A; break;
-                case KeyCode.VcH: keycode = 0x0B; break;
-                case KeyCode.VcI: keycode = 0x0C; break;
-                case KeyCode.VcJ: keycode = 0x0D; break;
-                case KeyCode.VcK: keycode = 0x0E; break;
-                case KeyCode.VcL: keycode = 0x0F; break;
-                case KeyCode.VcM: keycode = 0x10; break;
-                case KeyCode.VcN: keycode = 0x11; break;
-                case KeyCode.VcO: keycode = 0x12; break;
-                case KeyCode.VcP: keycode = 0x13; break;
-                case KeyCode.VcQ: keycode = 0x14; break;
-                case KeyCode.VcR: keycode = 0x15; break;
-                case KeyCode.VcS: keycode = 0x16; break;
-                case KeyCode.VcT: keycode = 0x17; break;
-                case KeyCode.VcU: keycode = 0x18; break;
-                case KeyCode.VcV: keycode = 0x19; break;
-                case KeyCode.VcW: keycode = 0x1A; break;
-                case KeyCode.VcX: keycode = 0x1B; break;
-                case KeyCode.VcY: keycode = 0x1C; break;
-                case KeyCode.VcZ: keycode = 0x1D; break;
+                switch (scanCode)
+                {
+                    case 0x52: hidCode = 0x49; break; // Insert/Numpad 0
+                    case 0x47: hidCode = 0x4A; break; // Home/Numpad 7
+                    case 0x49: hidCode = 0x4B; break; // Page Up/Numpad 8
+                    case 0x53: hidCode = 0x4C; break; // Delete/Numpad .
+                    case 0x4F: hidCode = 0x4D; break; // End/Numpad 1
+                    case 0x51: hidCode = 0x4E; break; // Page Down/Numpad 2
+                    case 0x4D: hidCode = 0x4F; break; // Right/Numpad 6
+                    case 0x4B: hidCode = 0x50; break; // Left/Numpad 4
+                    case 0x50: hidCode = 0x51; break; // Down/Numpad 5
+                    case 0x48: hidCode = 0x52; break; // Up/Numpad 8
+                    case 0x1C: hidCode = 0x58; break; // Enter
+                    case 0x35: hidCode = 0x54; break; // /
+                    case 0x37: hidCode = 0x46; break; // PrintScreen
 
-                // Numbers
-                case KeyCode.Vc1: keycode = 0x1E; break;
-                case KeyCode.Vc2: keycode = 0x1F; break;
-                case KeyCode.Vc3: keycode = 0x20; break;
-                case KeyCode.Vc4: keycode = 0x21; break;
-                case KeyCode.Vc5: keycode = 0x22; break;
-                case KeyCode.Vc6: keycode = 0x23; break;
-                case KeyCode.Vc7: keycode = 0x24; break;
-                case KeyCode.Vc8: keycode = 0x25; break;
-                case KeyCode.Vc9: keycode = 0x26; break;
-                case KeyCode.Vc0: keycode = 0x27; break;
+                    default:
+                        break;
+                }
+                return (byte)hidCode;
+            }
 
-                // Special keys
-                case KeyCode.VcEnter: keycode = 0x28; break;
-                case KeyCode.VcEscape: keycode = 0x29; break;
-                case KeyCode.VcBackspace: keycode = 0x2A; break;
-                case KeyCode.VcTab: keycode = 0x2B; break;
-                case KeyCode.VcSpace: keycode = 0x2C; break;
-                case KeyCode.VcMinus: keycode = 0x2D; break;
-                case KeyCode.VcEquals: keycode = 0x2E; break;
-                case KeyCode.VcOpenBracket: keycode = 0x2F; break;
-                case KeyCode.VcCloseBracket: keycode = 0x30; break;
-                case KeyCode.VcBackslash: keycode = 0x31; break;
-                case KeyCode.VcSemicolon: keycode = 0x33; break;
-                case KeyCode.VcQuote: keycode = 0x34; break;
-                case KeyCode.VcBackQuote: keycode = 0x35; break;
-                case KeyCode.VcComma: keycode = 0x36; break;
-                case KeyCode.VcPeriod: keycode = 0x37; break;
-                case KeyCode.VcSlash: keycode = 0x38; break;
-                case KeyCode.VcCapsLock: keycode = 0x39; break;
+            switch (scanCode)
+            {
 
-                // Function keys
-                case KeyCode.VcF1: keycode = 0x3A; break;
-                case KeyCode.VcF2: keycode = 0x3B; break;
-                case KeyCode.VcF3: keycode = 0x3C; break;
-                case KeyCode.VcF4: keycode = 0x3D; break;
-                case KeyCode.VcF5: keycode = 0x3E; break;
-                case KeyCode.VcF6: keycode = 0x3F; break;
-                case KeyCode.VcF7: keycode = 0x40; break;
-                case KeyCode.VcF8: keycode = 0x41; break;
-                case KeyCode.VcF9: keycode = 0x42; break;
-                case KeyCode.VcF10: keycode = 0x43; break;
-                case KeyCode.VcF11: keycode = 0x44; break;
-                case KeyCode.VcF12: keycode = 0x45; break;
+                case 0x1E: hidCode = 0x04; break; // A
+                case 0x30: hidCode = 0x05; break; // B
+                case 0x2E: hidCode = 0x06; break; // C
+                case 0x20: hidCode = 0x07; break; // D
+                case 0x12: hidCode = 0x08; break; // E
+                case 0x21: hidCode = 0x09; break; // F
+                case 0x22: hidCode = 0x0A; break; // G
+                case 0x23: hidCode = 0x0B; break; // H
+                case 0x17: hidCode = 0x0C; break; // I
+                case 0x24: hidCode = 0x0D; break; // J
+                case 0x25: hidCode = 0x0E; break; // K
+                case 0x26: hidCode = 0x0F; break; // L
+                case 0x32: hidCode = 0x10; break; // M
+                case 0x31: hidCode = 0x11; break; // N
+                case 0x18: hidCode = 0x12; break; // O
+                case 0x19: hidCode = 0x13; break; // P
+                case 0x10: hidCode = 0x14; break; // Q
+                case 0x13: hidCode = 0x15; break; // R
+                case 0x1F: hidCode = 0x16; break; // S
+                case 0x14: hidCode = 0x17; break; // T
+                case 0x16: hidCode = 0x18; break; // U
+                case 0x2F: hidCode = 0x19; break; // V
+                case 0x11: hidCode = 0x1A; break; // W
+                case 0x2D: hidCode = 0x1B; break; // X
+                case 0x15: hidCode = 0x1C; break; // Y
+                case 0x2C: hidCode = 0x1D; break; // Z
 
-                // Navigation
-                case KeyCode.VcPrintScreen: keycode = 0x46; break;
-                case KeyCode.VcScrollLock: keycode = 0x47; break;
-                case KeyCode.VcPause: keycode = 0x48; break;
-                case KeyCode.VcInsert: keycode = 0x49; break;
-                case KeyCode.VcHome: keycode = 0x4A; break;
-                case KeyCode.VcPageUp: keycode = 0x4B; break;
-                case KeyCode.VcDelete: keycode = 0x4C; break;
-                case KeyCode.VcEnd: keycode = 0x4D; break;
-                case KeyCode.VcPageDown: keycode = 0x4E; break;
-                case KeyCode.VcRight: keycode = 0x4F; break;
-                case KeyCode.VcLeft: keycode = 0x50; break;
-                case KeyCode.VcDown: keycode = 0x51; break;
-                case KeyCode.VcUp: keycode = 0x52; break;
+                case 0x02: hidCode = 0x1E; break; // 1
+                case 0x03: hidCode = 0x1F; break; // 2
+                case 0x04: hidCode = 0x20; break; // 3
+                case 0x05: hidCode = 0x21; break; // 4
+                case 0x06: hidCode = 0x22; break; // 5
+                case 0x07: hidCode = 0x23; break; // 6
+                case 0x08: hidCode = 0x24; break; // 7
+                case 0x09: hidCode = 0x25; break; // 8
+                case 0x0A: hidCode = 0x26; break; // 9
+                case 0x0B: hidCode = 0x27; break; // 0
 
-                //NumPad
-                case KeyCode.VcNumLock: keycode = 0x53; break;
-                case KeyCode.VcNumPadDivide: keycode = 0x54; break;
-                case KeyCode.VcNumPadMultiply: keycode = 0x55; break;
-                case KeyCode.VcNumPadSubtract: keycode = 0x56; break;
-                case KeyCode.VcNumPadAdd: keycode = 0x57; break;
-                case KeyCode.VcNumPadEnter: keycode = 0x58; break;
-                case KeyCode.VcNumPad1: keycode = 0x59; break;
-                case KeyCode.VcNumPad2: keycode = 0x5A; break;
-                case KeyCode.VcNumPad3: keycode = 0x5B; break;
-                case KeyCode.VcNumPad4: keycode = 0x5C; break;
-                case KeyCode.VcNumPad5: keycode = 0x5D; break;
-                case KeyCode.VcNumPad6: keycode = 0x5E; break;
-                case KeyCode.VcNumPad7: keycode = 0x5F; break;
-                case KeyCode.VcNumPad8: keycode = 0x60; break;
-                case KeyCode.VcNumPad9: keycode = 0x61; break;
-                case KeyCode.VcNumPad0: keycode = 0x62; break;
-                case KeyCode.VcNumPadDecimal: keycode = 0x63; break;
+                case 0x3B: hidCode = 0x3A; break; // F1
+                case 0x3C: hidCode = 0x3B; break; // F2
+                case 0x3D: hidCode = 0x3C; break; // F3
+                case 0x3E: hidCode = 0x3D; break; // F4
+                case 0x3F: hidCode = 0x3E; break; // F5
+                case 0x40: hidCode = 0x3F; break; // F6
+                case 0x41: hidCode = 0x40; break; // F7
+                case 0x42: hidCode = 0x41; break; // F8
+                case 0x43: hidCode = 0x42; break; // F9
+                case 0x44: hidCode = 0x43; break; // F10
+                case 0x57: hidCode = 0x44; break; // F11
+                case 0x58: hidCode = 0x45; break; // F12
 
-                case KeyCode.VcVolumeMute: keycode = 0x7F; break;
-                case KeyCode.VcVolumeUp: keycode = 0x80; break;
-                case KeyCode.VcVolumeDown: keycode = 0x81; break;
+                case 0x01: hidCode = 0x29; break; // ESC
+                case 0x0E: hidCode = 0x2A; break; // Backspace
+                case 0x0F: hidCode = 0x2B; break; // Tab
+
+                case 0x39: hidCode = 0x2C; break; // Space
+                case 0x0C: hidCode = 0x2D; break; // -
+                case 0x0D: hidCode = 0x2E; break; // =
+                case 0x1A: hidCode = 0x2F; break; // [
+                case 0x1B: hidCode = 0x30; break; // ]
+                case 0x2B: hidCode = 0x31; break; // \
+                case 0x27: hidCode = 0x33; break; // ;
+                case 0x28: hidCode = 0x34; break; // '
+                case 0x29: hidCode = 0x35; break; // `
+                case 0x33: hidCode = 0x36; break; // ,
+                case 0x34: hidCode = 0x37; break; // .
+                case 0x35: hidCode = 0x38; break; // / 
+                case 0x3A: hidCode = 0x39; break; // Caps Lock
+
+                case 0x52: hidCode = 0x62; break; // Numpad 0
+                case 0x47: hidCode = 0x5F; break; // Numpad 7
+                case 0x48: hidCode = 0x60; break; // Numpad 8
+                case 0x53: hidCode = 0x63; break; // Numpad .
+                case 0x4F: hidCode = 0x59; break; // Numpad 1
+                case 0x50: hidCode = 0x5A; break; // Numpad 2
+                case 0x51: hidCode = 0x5B; break; // Numpad 3
+                case 0x4D: hidCode = 0x5E; break; // Numpad 6
+                case 0x4B: hidCode = 0x5C; break; // Numpad 4
+                case 0x4C: hidCode = 0x5D; break; // Numpad 5
+                case 0x49: hidCode = 0x61; break; // Numpad 9
+                case 0x1C: hidCode = 0x28; break; // Numpad Enter 
+                case 0x45: hidCode = 0x53; break; // Num Lock
+                case 0x37: hidCode = 0x55; break; // Numpad *
+                case 0x4A: hidCode = 0x56; break; // Numpad -
+                case 0x4E: hidCode = 0x57; break; // Numpad +
+                case 0x1D: hidCode = isE1 ? 0x48 : 0x00; break; // Pause
+                case 0x46: hidCode = 0x47; break; // Scroll Lock
 
             }
 
-            return keycode;
+            return (byte)hidCode;
         }
 
-        public static byte MapKeyModifier(KeyCode keyCode)
+        private byte MapKeyModifier(short scanCode, short state)
         {
-            byte currentModifiers = 0;
+            bool isE0 = (state & INTERCEPTION_KEY_E0) != 0;
+            bool isE1 = (state & INTERCEPTION_KEY_E1) != 0;
 
-            switch (keyCode)
+            byte modifier = 0;
+
+            switch (scanCode)
             {
-                case KeyCode.VcLeftControl:
-                    currentModifiers |= HIDModifiers.LEFTCTRL;
+                case 0x1D: // Ctrl
+                    if (isE1)
+                    {
+                        break;
+                    }
+                    modifier = isE0 ? HIDModifiers.RIGHTCTRL : HIDModifiers.LEFTCTRL;
                     break;
-                case KeyCode.VcRightControl:
-                    currentModifiers |= HIDModifiers.RIGHTCTRL;
+                case 0x2A: // Left Shift
+                    modifier = isE0 ? (byte)0 : HIDModifiers.LEFTSHIFT;
                     break;
-                case KeyCode.VcLeftShift:
-                    currentModifiers |= HIDModifiers.LEFTSHIFT;
+                case 0x36: // Right Shift
+                    modifier = HIDModifiers.RIGHTSHIFT;
                     break;
-                case KeyCode.VcRightShift:
-                    currentModifiers |= HIDModifiers.RIGHTSHIFT;
+                case 0x38: // Alt
+                    modifier = isE0 ? HIDModifiers.RIGHTALT : HIDModifiers.LEFTALT;
                     break;
-                case KeyCode.VcLeftAlt:
-                    currentModifiers |= HIDModifiers.LEFTALT;
+                case 0x5B: // Left Win (E0)
+                    if (isE0) modifier = HIDModifiers.LEFTGUI;
                     break;
-                case KeyCode.VcRightAlt:
-                    currentModifiers |= HIDModifiers.RIGHTALT;
-                    break;
-                case KeyCode.VcLeftMeta:
-                    currentModifiers |= HIDModifiers.LEFTGUI;
-                    break;
-                case KeyCode.VcRightMeta:
-                    currentModifiers |= HIDModifiers.RIGHTGUI;
+                case 0x5C: // Right Win (E0)
+                    if (isE0) modifier = HIDModifiers.RIGHTGUI;
                     break;
             }
 
-            return currentModifiers;
+            return modifier;
         }
 
         private void workerConnect_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
@@ -740,7 +839,6 @@ namespace ArduKVM
             {
                 data = queue.Take();
                 serialPort.Write(data, 0, data.Length);
-                Debug.WriteLine($"Sent: {BitConverter.ToString(data)}");
             }
         }
 
@@ -759,27 +857,23 @@ namespace ArduKVM
             }
         }
 
-        private void timerInput_Tick(object sender, EventArgs e)
-        {
-
-        }
-
         private void workerMouse_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
         {
-            context = interception_create_context();
+            mouseContext = interception_create_context();
 
-            interception_set_filter(context,
+            interception_set_filter(mouseContext,
                 device => interception_is_mouse(device) ? 1 : 0,
                 INTERCEPTION_FILTER_MOUSE_ALL);
 
             int device = 0;
             int mouse = 0;
-            MouseStroke stroke = new MouseStroke();
+
+            InterceptionStroke stroke = new InterceptionStroke();
             while (isControllingExternalPC)
             {
                 if (mouse == 0)
                 {
-                    device = interception_wait_with_timeout(context, 1000);
+                    device = interception_wait_with_timeout(mouseContext, 1000);
                     if (device == 0)
                     {
                         continue;
@@ -791,37 +885,37 @@ namespace ArduKVM
                 }
 
 
-                if (interception_wait_with_timeout(context, 1000) != mouse)
+                if (interception_wait_with_timeout(mouseContext, 1000) != mouse)
                 {
                     continue;
                 }
 
-                if (interception_receive(context, mouse, ref stroke, 1) > 0)
+                if (interception_receive(mouseContext, mouse, ref stroke, 1) > 0)
                 {
-                    switch (stroke.state)
+                    switch (stroke.Mouse.state)
                     {
-                        case INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN: mouseReport[1] |= 1; SendReport(false); break;
-                        case INTERCEPTION_MOUSE_LEFT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~1); SendReport(false); break;
-                        case INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN: mouseReport[1] |= 2; SendReport(false); break;
-                        case INTERCEPTION_MOUSE_RIGHT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~2); SendReport(false); break;
-                        case INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN: mouseReport[1] |= 4; SendReport(false); break;
-                        case INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP: mouseReport[1] &= unchecked((byte)~4); SendReport(false); break;
+                        case INTERCEPTION_MOUSE_LEFT_BUTTON_DOWN: mouseReport[1] |= 1; break;
+                        case INTERCEPTION_MOUSE_LEFT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~1); break;
+                        case INTERCEPTION_MOUSE_RIGHT_BUTTON_DOWN: mouseReport[1] |= 2; break;
+                        case INTERCEPTION_MOUSE_RIGHT_BUTTON_UP: mouseReport[1] &= unchecked((byte)~2); break;
+                        case INTERCEPTION_MOUSE_MIDDLE_BUTTON_DOWN: mouseReport[1] |= 4; break;
+                        case INTERCEPTION_MOUSE_MIDDLE_BUTTON_UP: mouseReport[1] &= unchecked((byte)~4); break;
 
                         default:
-                            if (stroke.rolling != 0)
+
+                            if (stroke.Mouse.rolling != 0)
                             {
-                                wheel = (byte)stroke.rolling;
+                                wheel = (byte)stroke.Mouse.rolling;
                                 break;
                             }
-                            currentX += (short)stroke.x;
-                            currentY += (short)stroke.y;
+                            currentX += (short)stroke.Mouse.x;
+                            currentY += (short)stroke.Mouse.y;
                             break;
                     }
 
-                    //interception_send(context, mouse, ref stroke, 1);
                 }
             }
-            interception_destroy_context(context);
+            interception_destroy_context(mouseContext);
             Debug.WriteLine("WorkerMouse done");
         }
 
@@ -834,6 +928,66 @@ namespace ArduKVM
             }
         }
 
+        private void workerKeyboard_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
+        {
+            keyboardContext = interception_create_context();
 
+            interception_set_filter(keyboardContext,
+                device => interception_is_keyboard(device) ? 1 : 0,
+                INTERCEPTION_FILTER_KEY_ALL);
+
+            int device = 0;
+            int keyboard = 0;
+
+            InterceptionStroke stroke = new InterceptionStroke();
+
+            while (true)
+            {
+                if (keyboard == 0)
+                {
+                    device = interception_wait_with_timeout(keyboardContext, 1000);
+                    if (device == 0)
+                    {
+                        continue;
+                    }
+                    if (interception_is_keyboard(device))
+                    {
+                        keyboard = device;
+                    }
+                }
+
+                if (interception_wait_with_timeout(keyboardContext, 1000) != keyboard)
+                {
+                    continue;
+                }
+
+                if (interception_receive(keyboardContext, keyboard, ref stroke, 1) <= 0)
+                {
+                    continue;
+                }
+                bool passKey = false;
+                if ((stroke.Keyboard.state & 0x01) == INTERCEPTION_KEY_DOWN)
+                {
+                    passKey = OnKeyPressed(stroke.Keyboard.code, stroke.Keyboard.state);
+                }
+                else if ((stroke.Keyboard.state & 0x01) == INTERCEPTION_KEY_UP)
+                {
+                    passKey = OnKeyReleased(stroke.Keyboard.code, stroke.Keyboard.state);
+                }
+
+                if (passKey)
+                {
+                    interception_send(keyboardContext, keyboard, ref stroke, 1);
+                }
+            }
+
+            interception_destroy_context(keyboardContext);
+            Debug.WriteLine("WorkerKeyboard done");
+        }
+
+        private void workerSwitchPC_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
+        {
+            Invoke((MethodInvoker)delegate { SwitchPCs(); });
+        }
     }
 }
