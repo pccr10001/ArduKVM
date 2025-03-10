@@ -27,23 +27,23 @@ void loop() {
   
   while(Serial2.available()) {
     uint8_t tmp = Serial2.read();
-    if(tmp == 0xb3 || tmp == 0xb4){
+    if(tmp == 0x73 || tmp == 0x74){
       len = 0;
     }
     buffer[len++] = tmp;
     if(len == 16){
       len=0;
-    }else if(buffer[0] == 0xb3 && len == 9){
+    }else if(buffer[0] == 0x73 && len == 9){
       break;
-    }else if(buffer[0] == 0xb4 && len == 5){
+    }else if(buffer[0] == 0x74 && len == 5){
       break;
     }
   }
   char type = buffer[0];
     
-    if(type == 0xb3) {
+    if(type == 0x73) {
       Keyboard.setReport(buffer+1);
-    } else if (type==0xb4){
+    } else if (type==0x74){
       Mouse.setReport(buffer+1);
     }
     len=0;
