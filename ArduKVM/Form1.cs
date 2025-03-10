@@ -275,10 +275,13 @@ namespace ArduKVM
             }
             catch (Exception ex)
             {
-
+                mappings = new List<PortMapping>();
+                for (int i = 0; i < portCount; i++)
+                {
+                    mappings.Add(new PortMapping() { Port = "No used", Input = inputSources.ElementAt(i).Value });
+                }
             }
 
-            UpdateCurrentInput();
             SwitchPCs();
 
             workerSerial.RunWorkerAsync();
@@ -322,7 +325,7 @@ namespace ArduKVM
                     return false;
                 }
                 return true;
-                
+
             }
 
 
@@ -609,7 +612,8 @@ namespace ArduKVM
             }
             else
             {
-                while (true)
+                bool selected = false;
+                for (int i = 0; i < portCount; i++)
                 {
                     selectedInput++;
                     if (selectedInput >= portCount)
@@ -620,12 +624,23 @@ namespace ArduKVM
                     {
                         continue;
                     }
+                    selected = true;
                     break;
+                }
+                if (!selected)
+                {
+                    return;
                 }
             }
 
 
             var pm = mappings[selectedInput];
+
+            if (pm.Port == "No used")
+            {
+                return;
+            }
+
             uint inputId = Convert.ToUInt32(pm.Input, 16);
 
             Debug.WriteLine($"Start switching");
@@ -905,7 +920,7 @@ namespace ArduKVM
 
                             if (stroke.Mouse.rolling != 0)
                             {
-                                wheel = (byte)stroke.Mouse.rolling;
+                                wheel = (byte)(stroke.Mouse.rolling > 0 ? 1 : -1);
                                 break;
                             }
                             currentX += (short)stroke.Mouse.x;
@@ -930,7 +945,16 @@ namespace ArduKVM
 
         private void workerKeyboard_DoWork(object sender, System.ComponentModel.DoWorkEventArgs e)
         {
-            keyboardContext = interception_create_context();
+            try
+            {
+                keyboardContext = interception_create_context();
+            }catch (Exception ex)
+            {
+                MessageBox.Show("Failed to create keyboard context, is the Interception installed?");
+                Application.Exit();
+                return;
+            }
+
 
             interception_set_filter(keyboardContext,
                 device => interception_is_keyboard(device) ? 1 : 0,
